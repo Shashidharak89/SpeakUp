@@ -1,5 +1,12 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
+// ResponsiveVoice Indian English voice name
+const RV_VOICE = "Indian English Female";
+
+// Detect if ResponsiveVoice is loaded
+const hasRV = () =>
+  typeof window !== "undefined" && window.responsiveVoice;
+
 function App() {
   const [text, setText] = useState("");
   const [words, setWords] = useState([]);
@@ -11,48 +18,59 @@ function App() {
   const [volume, setVolume] = useState(1);
   const [voices, setVoices] = useState([]);
   const [selectedVoice, setSelectedVoice] = useState(null);
-  // "word" = word-by-word | "flow" = full sentence flow
+  // "word" = word-by-word | "flow" = sentence flow
   const [mode, setMode] = useState("word");
+  // "browser" = Web Speech API | "indian" = ResponsiveVoice Indian English
+  const [engine, setEngine] = useState("browser");
+  const [rvReady, setRvReady] = useState(false);
 
   const utteranceRef = useRef(null);
   const wordIndexRef = useRef(0);
   const intervalRef = useRef(null);
+  const rvWordTimerRef = useRef(null);
 
-  // Load available voices
+  // Load browser voices
   useEffect(() => {
     const loadVoices = () => {
       const available = window.speechSynthesis.getVoices();
       if (available.length > 0) {
         setVoices(available);
-        setSelectedVoice(available[0]);
+        // Auto-select en-IN voice if available
+        const inVoice =
+          available.find((v) => v.lang === "en-IN") || available[0];
+        setSelectedVoice(inVoice);
       }
     };
     loadVoices();
     window.speechSynthesis.onvoiceschanged = loadVoices;
   }, []);
 
+  // Poll until ResponsiveVoice is ready
+  useEffect(() => {
+    if (hasRV()) { setRvReady(true); return; }
+    const timer = setInterval(() => {
+      if (hasRV()) { setRvReady(true); clearInterval(timer); }
+    }, 300);
+    return () => clearInterval(timer);
+  }, []);
+
+  // ── Stop everything ────────────────────────────────────────────────
   const stopSpeech = useCallback(() => {
     window.speechSynthesis.cancel();
     clearInterval(intervalRef.current);
+    clearTimeout(rvWordTimerRef.current);
+    if (hasRV()) window.responsiveVoice.cancel();
     setIsPlaying(false);
     setIsPaused(false);
     setCurrentWordIndex(-1);
     wordIndexRef.current = 0;
   }, []);
 
-  const speakWordByWord = useCallback(
-    (startIndex = 0) => {
-      const trimmed = text.trim();
-      if (!trimmed) return;
-
-      const wordList = trimmed.split(/\s+/);
-      setWords(wordList);
-
+  // ── Browser: Word-by-Word ──────────────────────────────────────────
+  const browserWordByWord = useCallback(
+    (wordList, startIndex = 0) => {
       window.speechSynthesis.cancel();
-      clearInterval(intervalRef.current);
-
       let idx = startIndex;
-      wordIndexRef.current = idx;
 
       const speakNext = () => {
         if (idx >= wordList.length) {
@@ -61,102 +79,156 @@ function App() {
           setCurrentWordIndex(-1);
           return;
         }
-
         setCurrentWordIndex(idx);
         wordIndexRef.current = idx;
 
-        const utterance = new SpeechSynthesisUtterance(wordList[idx]);
-        utterance.rate = rate;
-        utterance.pitch = pitch;
-        utterance.volume = volume;
-        if (selectedVoice) utterance.voice = selectedVoice;
-
-        utterance.onend = () => {
-          idx += 1;
-          speakNext();
-        };
-
-        utterance.onerror = () => {
-          idx += 1;
-          speakNext();
-        };
-
-        utteranceRef.current = utterance;
-        window.speechSynthesis.speak(utterance);
+        const utt = new SpeechSynthesisUtterance(wordList[idx]);
+        utt.rate = rate;
+        utt.pitch = pitch;
+        utt.volume = volume;
+        if (selectedVoice) utt.voice = selectedVoice;
+        utt.onend = () => { idx += 1; speakNext(); };
+        utt.onerror = () => { idx += 1; speakNext(); };
+        utteranceRef.current = utt;
+        window.speechSynthesis.speak(utt);
       };
-
-      setIsPlaying(true);
-      setIsPaused(false);
       speakNext();
     },
-    [text, rate, pitch, volume, selectedVoice]
+    [rate, pitch, volume, selectedVoice]
   );
 
-  // ── Flow mode: speak entire text as one natural utterance ──────────
-  const speakInFlow = useCallback(() => {
-    const trimmed = text.trim();
-    if (!trimmed) return;
+  // ── Browser: Flow ──────────────────────────────────────────────────
+  const browserFlow = useCallback(
+    (wordList, fullText) => {
+      window.speechSynthesis.cancel();
+      const utt = new SpeechSynthesisUtterance(fullText);
+      utt.rate = rate;
+      utt.pitch = pitch;
+      utt.volume = volume;
+      if (selectedVoice) utt.voice = selectedVoice;
 
-    const wordList = trimmed.split(/\s+/);
-    setWords(wordList);
-
-    window.speechSynthesis.cancel();
-
-    const utterance = new SpeechSynthesisUtterance(trimmed);
-    utterance.rate = rate;
-    utterance.pitch = pitch;
-    utterance.volume = volume;
-    if (selectedVoice) utterance.voice = selectedVoice;
-
-    // Track word boundaries if browser supports it
-    utterance.onboundary = (e) => {
-      if (e.name === "word") {
-        // charIndex maps to word index
-        let charCount = 0;
-        for (let i = 0; i < wordList.length; i++) {
-          if (charCount >= e.charIndex) {
-            setCurrentWordIndex(i);
-            wordIndexRef.current = i;
-            break;
+      utt.onboundary = (e) => {
+        if (e.name === "word") {
+          let charCount = 0;
+          for (let i = 0; i < wordList.length; i++) {
+            if (charCount >= e.charIndex) {
+              setCurrentWordIndex(i);
+              wordIndexRef.current = i;
+              break;
+            }
+            charCount += wordList[i].length + 1;
           }
-          charCount += wordList[i].length + 1;
         }
-      }
-    };
+      };
+      utt.onend = () => {
+        setIsPlaying(false); setIsPaused(false); setCurrentWordIndex(-1);
+      };
+      utt.onerror = () => {
+        setIsPlaying(false); setIsPaused(false); setCurrentWordIndex(-1);
+      };
+      utteranceRef.current = utt;
+      window.speechSynthesis.speak(utt);
+    },
+    [rate, pitch, volume, selectedVoice]
+  );
 
-    utterance.onend = () => {
-      setIsPlaying(false);
-      setIsPaused(false);
-      setCurrentWordIndex(-1);
-    };
+  // ── ResponsiveVoice: Word-by-Word ──────────────────────────────────
+  const rvWordByWord = useCallback(
+    (wordList, startIndex = 0) => {
+      if (!hasRV()) return;
+      window.responsiveVoice.cancel();
+      let idx = startIndex;
 
-    utterance.onerror = () => {
-      setIsPlaying(false);
-      setIsPaused(false);
-      setCurrentWordIndex(-1);
-    };
+      const speakNext = () => {
+        if (idx >= wordList.length) {
+          setIsPlaying(false); setIsPaused(false); setCurrentWordIndex(-1);
+          return;
+        }
+        setCurrentWordIndex(idx);
+        wordIndexRef.current = idx;
 
-    utteranceRef.current = utterance;
-    setIsPlaying(true);
-    setIsPaused(false);
-    window.speechSynthesis.speak(utterance);
-  }, [text, rate, pitch, volume, selectedVoice]);
+        window.responsiveVoice.speak(wordList[idx], RV_VOICE, {
+          rate: rate,
+          pitch: pitch,
+          volume: volume,
+          onend: () => { idx += 1; speakNext(); },
+          onerror: () => { idx += 1; speakNext(); },
+        });
+      };
+      speakNext();
+    },
+    [rate, pitch, volume]
+  );
 
-  const handlePlay = () => {
-    if (isPaused) {
+  // ── ResponsiveVoice: Flow (full sentence) ──────────────────────────
+  const rvFlow = useCallback(
+    (wordList, fullText) => {
+      if (!hasRV()) return;
+      window.responsiveVoice.cancel();
+
+      // Estimate word timing for highlighting
+      const avgWordDurationMs = (60 / (rate * 150)) * 1000;
+      let idx = 0;
+
+      const tick = () => {
+        if (idx >= wordList.length) return;
+        setCurrentWordIndex(idx);
+        wordIndexRef.current = idx;
+        idx++;
+        rvWordTimerRef.current = setTimeout(tick, avgWordDurationMs);
+      };
+
+      window.responsiveVoice.speak(fullText, RV_VOICE, {
+        rate: rate,
+        pitch: pitch,
+        volume: volume,
+        onstart: () => { tick(); },
+        onend: () => {
+          clearTimeout(rvWordTimerRef.current);
+          setIsPlaying(false); setIsPaused(false); setCurrentWordIndex(-1);
+        },
+        onerror: () => {
+          clearTimeout(rvWordTimerRef.current);
+          setIsPlaying(false); setIsPaused(false); setCurrentWordIndex(-1);
+        },
+      });
+    },
+    [rate, pitch, volume]
+  );
+
+  // ── Master play handler ────────────────────────────────────────────
+  const handlePlay = useCallback(() => {
+    if (isPaused && engine === "browser") {
       window.speechSynthesis.resume();
       setIsPlaying(true);
       setIsPaused(false);
-    } else if (mode === "flow") {
-      speakInFlow();
-    } else {
-      speakWordByWord(0);
+      return;
     }
-  };
+
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const wordList = trimmed.split(/\s+/);
+    setWords(wordList);
+    setIsPlaying(true);
+    setIsPaused(false);
+
+    if (engine === "indian") {
+      if (!rvReady) { alert("Indian English voice is still loading, please wait a moment."); setIsPlaying(false); return; }
+      mode === "word" ? rvWordByWord(wordList, 0) : rvFlow(wordList, trimmed);
+    } else {
+      mode === "word" ? browserWordByWord(wordList, 0) : browserFlow(wordList, trimmed);
+    }
+  }, [isPaused, engine, text, mode, rvReady, rvWordByWord, rvFlow, browserWordByWord, browserFlow]);
 
   const handlePause = () => {
-    if (window.speechSynthesis.speaking) {
+    if (engine === "browser" && window.speechSynthesis.speaking) {
       window.speechSynthesis.pause();
+      setIsPlaying(false);
+      setIsPaused(true);
+    } else if (engine === "indian") {
+      // RV doesn't support pause natively — stop and mark paused
+      clearTimeout(rvWordTimerRef.current);
+      window.responsiveVoice.cancel();
       setIsPlaying(false);
       setIsPaused(true);
     }
@@ -184,7 +256,7 @@ function App() {
           <span className="logo-icon">🔊</span>
           <span className="logo-text">SpeakUp</span>
         </div>
-        <p className="tagline">Word-by-word · Sentence flow pronunciation tool</p>
+        <p className="tagline">Word-by-word · Sentence flow · Indian English</p>
       </header>
 
       <main className="main">
@@ -207,15 +279,12 @@ function App() {
           </div>
         </section>
 
-        {/* Word Display */}
+        {/* Word Tracker */}
         {words.length > 0 && (
           <section className="word-display card">
             <label className="section-label">Word Tracker</label>
             <div className="progress-bar-wrap">
-              <div
-                className="progress-bar-fill"
-                style={{ width: `${progress}%` }}
-              />
+              <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
             </div>
             <p className="progress-text">
               {currentWordIndex >= 0
@@ -241,7 +310,7 @@ function App() {
           </section>
         )}
 
-        {/* Current Word Spotlight */}
+        {/* Spotlight */}
         {currentWordIndex >= 0 && words[currentWordIndex] && (
           <section className="spotlight card">
             <label className="section-label">Currently Speaking</label>
@@ -252,6 +321,35 @@ function App() {
         {/* Controls */}
         <section className="controls-card card">
           <label className="section-label">Playback Controls</label>
+
+          {/* Engine Toggle */}
+          <div className="engine-toggle-wrap">
+            <span className="toggle-label">🌐 Voice Engine</span>
+            <div className="engine-toggle">
+              <button
+                className={`engine-btn ${engine === "browser" ? "engine-active" : ""}`}
+                onClick={() => { stopSpeech(); setWords([]); setEngine("browser"); }}
+              >
+                🖥 Browser
+              </button>
+              <button
+                className={`engine-btn ${engine === "indian" ? "engine-active engine-indian" : ""}`}
+                onClick={() => { stopSpeech(); setWords([]); setEngine("indian"); }}
+              >
+                🇮🇳 Indian English
+                {engine === "indian" && !rvReady && (
+                  <span className="loading-dot"> ...</span>
+                )}
+              </button>
+            </div>
+            {engine === "indian" && (
+              <p className="engine-note">
+                {rvReady
+                  ? "✅ Indian English Female voice (ResponsiveVoice) is ready"
+                  : "⏳ Loading Indian English voice…"}
+              </p>
+            )}
+          </div>
 
           {/* Mode Toggle */}
           <div className="mode-toggle">
@@ -306,81 +404,50 @@ function App() {
 
           {/* Sliders */}
           <div className="sliders">
-            {/* Speed */}
             <div className="slider-group">
               <div className="slider-label-row">
                 <span>🐢 Speed</span>
                 <span className="slider-val">{rate.toFixed(1)}×</span>
               </div>
               <input
-                type="range"
-                min="0.5"
-                max="2"
-                step="0.1"
-                value={rate}
+                type="range" min="0.5" max="2" step="0.1" value={rate}
                 onChange={(e) => setRate(parseFloat(e.target.value))}
                 className="slider slider-speed"
               />
-              <div className="slider-ticks">
-                <span>0.5×</span>
-                <span>1×</span>
-                <span>2×</span>
-              </div>
+              <div className="slider-ticks"><span>0.5×</span><span>1×</span><span>2×</span></div>
             </div>
 
-            {/* Pitch */}
             <div className="slider-group">
               <div className="slider-label-row">
                 <span>🎵 Pitch</span>
                 <span className="slider-val">{pitch.toFixed(1)}</span>
               </div>
               <input
-                type="range"
-                min="0.5"
-                max="2"
-                step="0.1"
-                value={pitch}
+                type="range" min="0.5" max="2" step="0.1" value={pitch}
                 onChange={(e) => setPitch(parseFloat(e.target.value))}
                 className="slider slider-pitch"
               />
-              <div className="slider-ticks">
-                <span>Low</span>
-                <span>Normal</span>
-                <span>High</span>
-              </div>
+              <div className="slider-ticks"><span>Low</span><span>Normal</span><span>High</span></div>
             </div>
 
-            {/* Volume */}
             <div className="slider-group">
               <div className="slider-label-row">
                 <span>🔈 Volume</span>
-                <span className="slider-val">
-                  {Math.round(volume * 100)}%
-                </span>
+                <span className="slider-val">{Math.round(volume * 100)}%</span>
               </div>
               <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                value={volume}
+                type="range" min="0" max="1" step="0.05" value={volume}
                 onChange={(e) => setVolume(parseFloat(e.target.value))}
                 className="slider slider-volume"
               />
-              <div className="slider-ticks">
-                <span>0%</span>
-                <span>50%</span>
-                <span>100%</span>
-              </div>
+              <div className="slider-ticks"><span>0%</span><span>50%</span><span>100%</span></div>
             </div>
           </div>
 
-          {/* Voice Selector */}
-          {voices.length > 0 && (
+          {/* Browser Voice Selector (only in browser engine) */}
+          {engine === "browser" && voices.length > 0 && (
             <div className="voice-select-wrap">
-              <label className="slider-label-row">
-                <span>🎙 Voice</span>
-              </label>
+              <label className="slider-label-row"><span>🎙 Browser Voice</span></label>
               <select
                 className="voice-select"
                 value={selectedVoice ? selectedVoice.name : ""}
@@ -401,7 +468,7 @@ function App() {
       </main>
 
       <footer className="footer">
-        <p>SpeakUp — Powered by Web Speech API</p>
+        <p>SpeakUp — Browser Speech API · ResponsiveVoice Indian English</p>
       </footer>
     </div>
   );
