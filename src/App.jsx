@@ -11,6 +11,8 @@ function App() {
   const [volume, setVolume] = useState(1);
   const [voices, setVoices] = useState([]);
   const [selectedVoice, setSelectedVoice] = useState(null);
+  // "word" = word-by-word | "flow" = full sentence flow
+  const [mode, setMode] = useState("word");
 
   const utteranceRef = useRef(null);
   const wordIndexRef = useRef(0);
@@ -90,11 +92,63 @@ function App() {
     [text, rate, pitch, volume, selectedVoice]
   );
 
+  // ── Flow mode: speak entire text as one natural utterance ──────────
+  const speakInFlow = useCallback(() => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    const wordList = trimmed.split(/\s+/);
+    setWords(wordList);
+
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(trimmed);
+    utterance.rate = rate;
+    utterance.pitch = pitch;
+    utterance.volume = volume;
+    if (selectedVoice) utterance.voice = selectedVoice;
+
+    // Track word boundaries if browser supports it
+    utterance.onboundary = (e) => {
+      if (e.name === "word") {
+        // charIndex maps to word index
+        let charCount = 0;
+        for (let i = 0; i < wordList.length; i++) {
+          if (charCount >= e.charIndex) {
+            setCurrentWordIndex(i);
+            wordIndexRef.current = i;
+            break;
+          }
+          charCount += wordList[i].length + 1;
+        }
+      }
+    };
+
+    utterance.onend = () => {
+      setIsPlaying(false);
+      setIsPaused(false);
+      setCurrentWordIndex(-1);
+    };
+
+    utterance.onerror = () => {
+      setIsPlaying(false);
+      setIsPaused(false);
+      setCurrentWordIndex(-1);
+    };
+
+    utteranceRef.current = utterance;
+    setIsPlaying(true);
+    setIsPaused(false);
+    window.speechSynthesis.speak(utterance);
+  }, [text, rate, pitch, volume, selectedVoice]);
+
   const handlePlay = () => {
     if (isPaused) {
       window.speechSynthesis.resume();
       setIsPlaying(true);
       setIsPaused(false);
+    } else if (mode === "flow") {
+      speakInFlow();
     } else {
       speakWordByWord(0);
     }
@@ -130,7 +184,7 @@ function App() {
           <span className="logo-icon">🔊</span>
           <span className="logo-text">SpeakUp</span>
         </div>
-        <p className="tagline">Word-by-word text pronunciation tool</p>
+        <p className="tagline">Word-by-word · Sentence flow pronunciation tool</p>
       </header>
 
       <main className="main">
@@ -198,6 +252,22 @@ function App() {
         {/* Controls */}
         <section className="controls-card card">
           <label className="section-label">Playback Controls</label>
+
+          {/* Mode Toggle */}
+          <div className="mode-toggle">
+            <button
+              className={`mode-btn ${mode === "word" ? "mode-active" : ""}`}
+              onClick={() => { stopSpeech(); setWords([]); setMode("word"); }}
+            >
+              🔤 Word by Word
+            </button>
+            <button
+              className={`mode-btn ${mode === "flow" ? "mode-active" : ""}`}
+              onClick={() => { stopSpeech(); setWords([]); setMode("flow"); }}
+            >
+              🌊 Sentence Flow
+            </button>
+          </div>
 
           {/* Play / Pause / Stop / Reset */}
           <div className="btn-row">
